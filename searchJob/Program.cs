@@ -1,93 +1,466 @@
 ﻿using System;
+using System.IO;
 using System.Text;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 
-struct JobRecord
-{
-    public string Title;
-    public double Salary;
-    public int Vacancies;
-    public double Competition;
-
-    public JobRecord(string title, double salary, int vacancies, double competition)
-    {
-        Title = title;
-        Salary = salary;
-        Vacancies = vacancies;
-        Competition = competition;
-    }
-}
-
-struct Client
-{
-    public string Name;
-    public int Age;
-    public string City;
-    public string Profession;
-
-    public Client(string name, int age, string city, string profession)
-    {
-        Name = name;
-        Age = age;
-        City = city;
-        Profession = profession;
-    }
-}
+record JobRecord(int Id, string Title, double Salary, int Vacancies, double Competition, int ClientId);
+record ClientRecord(int Id, string Name, int Age, string City, string Profession);
+record UserRecord(int Id, string Email, string PasswordHash);
 
 
 class Program
 {
+    
+    const string JobsFile = "jobs.csv";
+    const string ClientsFile = "clients.csv";
+    const string UsersFile = "users.csv";
 
-    static JobRecord[] jobsData = new JobRecord[5];
-    static Client[] clients = new Client[5];
-
+    
+    static readonly string JobsHeader = "Id,Title,Salary,Vacancies,Competition,ClientId";
+    static readonly string ClientsHeader = "Id,Name,Age,City,Profession";
+    static readonly string UsersHeader = "Id,Email,PasswordHash";
 
     static void Main()
     {
         Console.OutputEncoding = Encoding.UTF8;
         Console.InputEncoding = Encoding.UTF8;
 
-        if (LoginSystem())
-            ShowMainMenu();
+        
+        EnsureFileWithHeader(JobsFile, JobsHeader);
+        EnsureFileWithHeader(ClientsFile, ClientsHeader);
+        EnsureFileWithHeader(UsersFile, UsersHeader);
+
+        
+        var users = ReadAllUsers();
+        if (users.Count == 0)
+        {
+            var admin = new UserRecord(GetNextIdFromFile(UsersFile), "admin", ComputeHash("1234"));
+            AppendLineToFile(UsersFile, ToCsv(admin.Email, admin.PasswordHash, admin.Id.ToString()));
+            users = new List<UserRecord> { admin };
+            WriteAllUsers(users);
+        }
+
+        if (!LoginSystem())
+        {
+            Console.WriteLine("Вихід.");
+            return;
+        }
+
+        ShowMainMenu();
     }
 
+   
+
+    static void EnsureFileWithHeader(string path, string header)
+    {
+        if (!File.Exists(path))
+        {
+            File.WriteAllText(path, header + Environment.NewLine, new UTF8Encoding(false));
+            return;
+        }
+     
+        try
+        {
+            using var sr = new StreamReader(path, Encoding.UTF8);
+            string first = sr.ReadLine();
+            if (first == null || !first.Trim().Equals(header, StringComparison.OrdinalIgnoreCase))
+            {
+              
+                var rest = new List<string>();
+                string line;
+                if (first != null) rest.Add(first);
+                while ((line = sr.ReadLine()) != null) rest.Add(line);
+
+                
+                using var sw = new StreamWriter(path, false, new UTF8Encoding(false));
+                sw.WriteLine(header);
+                foreach (var r in rest) if (!string.IsNullOrWhiteSpace(r)) sw.WriteLine(r);
+            }
+        }
+        catch
+        {
+           
+            File.WriteAllText(path, header + Environment.NewLine, new UTF8Encoding(false));
+        }
+    }
+
+    static void AppendLineToFile(string path, string line)
+    {
+        try
+        {
+            using var sw = new StreamWriter(path, true, new UTF8Encoding(false));
+            sw.WriteLine(line);
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Помилка дозапису у файл {path}: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
+
+    static void WriteAllLines(string path, IEnumerable<string> lines)
+    {
+        try
+        {
+            using var sw = new StreamWriter(path, false, new UTF8Encoding(false));
+            foreach (var line in lines) sw.WriteLine(line);
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Помилка запису файлу {path}: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
+
+    static string EscapeCsv(string field)
+    {
+        if (field == null) return "";
+        if (field.Contains('"'))
+            field = field.Replace("\"", "\"\"");
+        if (field.Contains(',') || field.Contains('"') || field.Contains('\n') || field.Contains('\r'))
+            return $"\"{field}\"";
+        return field;
+    }
+
+    static List<string> ParseCsvLine(string line)
+    {
+        var res = new List<string>();
+        if (line == null) return res;
+        int i = 0; int n = line.Length;
+        while (i < n)
+        {
+            if (line[i] == '"')
+            {
+                
+                i++; var sb = new StringBuilder();
+                while (i < n)
+                {
+                    if (line[i] == '"')
+                    {
+                        if (i + 1 < n && line[i + 1] == '"')
+                        {
+                            sb.Append('"');
+                            i += 2;
+                        }
+                        else
+                        {
+                            i++; 
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(line[i]);
+                        i++;
+                    }
+                }
+               
+                while (i < n && line[i] != ',') i++;
+                if (i < n && line[i] == ',') i++;
+                res.Add(sb.ToString());
+            }
+            else
+            {
+                var start = i;
+                while (i < n && line[i] != ',') i++;
+                res.Add(line.Substring(start, i - start));
+                if (i < n && line[i] == ',') i++;
+            }
+        }
+        return res;
+    }
+
+    static string ToCsv(params string[] fields)
+    {
+        var parts = new List<string>(fields.Length);
+        foreach (var f in fields) parts.Add(EscapeCsv(f));
+        return string.Join(",", parts);
+    }
+
+    
+    static int GetNextIdFromFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return 1;
+            using var sr = new StreamReader(path, Encoding.UTF8);
+            string header = sr.ReadLine();
+            int max = 0;
+            string line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var fields = ParseCsvLine(line);
+                    if (fields.Count == 0) continue;
+                    if (int.TryParse(fields[0], out int id))
+                        if (id > max) max = id;
+                }
+                catch { continue; }
+            }
+            return max + 1;
+        }
+        catch
+        {
+            return 1;
+        }
+    }
+
+   
+
+  
 
     static bool LoginSystem()
     {
-        const string correctLogin = "admin";
-        const string correctPass = "1234";
-
-        int attempts = 3;
-
-        do
+        while (true)
         {
             Console.ForegroundColor = ConsoleColor.DarkCyan;
-            Console.Write("--- Вхід у систему ---");
+            Console.WriteLine("--- Вхід у систему ---");
             Console.ResetColor();
-            Console.Write("\nЛогін: ");
-            string login = Console.ReadLine();
-
-            Console.Write("Пароль: ");
-            string pass = Console.ReadLine();
-
-            if (login == correctLogin && pass == correctPass)
+            Console.WriteLine("1. Увійти");
+            Console.WriteLine("2. Зареєструватися");
+            Console.WriteLine("0. Вихід");
+            Console.Write("Виберіть (0-2): ");
+            var k = Console.ReadLine();
+            if (k == "0") return false;
+            if (k == "2") { RegisterUser(); continue; }
+            if (k == "1")
             {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("Вхід виконано успішно!\n");
-                Console.ResetColor();
-                return true;
+                Console.Write("Email: ");
+                var email = Console.ReadLine()?.Trim().ToLower();
+                Console.Write("Пароль: ");
+                var pass = ReadPassword();
+
+                if (Authenticate(email, pass))
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("Вхід виконано успішно!\n");
+                    Console.ResetColor();
+                    return true;
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Невірні дані. Спробуйте ще.");
+                    Console.ResetColor();
+                }
             }
-
-            attempts--;
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Невірні дані. Залишилось спроб: {attempts}");
-            Console.ResetColor();
-
-        } while (attempts > 0);
-
-        Console.WriteLine("Спроби вичерпано. Програма завершується.");
-        return false;
+        }
     }
+
+    static void RegisterUser()
+    {
+        Console.WriteLine("\n--- Реєстрація ---");
+        Console.Write("Email: ");
+        var email = Console.ReadLine()?.Trim().ToLower();
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            Console.WriteLine("Порожній email. Скасовано.");
+            return;
+        }
+        var users = ReadAllUsers();
+        bool exists = false;
+        foreach (var user in users)
+        {
+            if (user.Email.Equals(email, StringComparison.OrdinalIgnoreCase))
+            {
+                exists = true;
+                break;
+            }
+        }
+        if (exists)
+        {
+            Console.WriteLine("Користувач з таким email вже існує.");
+            return;
+        }
+        Console.Write("Пароль: ");
+        var pass = ReadPassword();
+        if (string.IsNullOrWhiteSpace(pass)) { Console.WriteLine("Порожній пароль. Скасовано."); return; }
+
+        var id = GetNextIdFromFile(UsersFile);
+        var hash = ComputeHash(pass);
+        var u = new UserRecord(id, email, hash);
+       
+        AppendLineToFile(UsersFile, ToCsv(id.ToString(), email, hash));
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("Реєстрацію завершено.");
+        Console.ResetColor();
+    }
+
+    static bool Authenticate(string email, string password)
+    {
+        try
+        {
+            var users = ReadAllUsers();
+            var hash = ComputeHash(password);
+            foreach (var u in users)
+            {
+                if (u.Email.Equals(email, StringComparison.OrdinalIgnoreCase) && u.PasswordHash == hash)
+                    return true;
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static List<UserRecord> ReadAllUsers()
+    {
+        var res = new List<UserRecord>();
+        try
+        {
+            using var sr = new StreamReader(UsersFile, Encoding.UTF8);
+            string header = sr.ReadLine();
+            string line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var f = ParseCsvLine(line);
+                   
+                    if (f.Count < 3) continue;
+                    if (!int.TryParse(f[0], out int id)) continue;
+                    var email = f[1];
+                    var ph = f[2];
+                    res.Add(new UserRecord(id, email, ph));
+                }
+                catch { continue; }
+            }
+        }
+        catch { }
+        return res;
+    }
+
+    static void WriteAllUsers(List<UserRecord> users)
+    {
+        var lines = new List<string> { UsersHeader };
+        foreach (var u in users)
+            lines.Add(ToCsv(u.Id.ToString(), u.Email, u.PasswordHash));
+        WriteAllLines(UsersFile, lines);
+    }
+
+    static string ComputeHash(string input)
+    {
+        using var sha = SHA256.Create();
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var hash = sha.ComputeHash(bytes);
+        return Convert.ToHexString(hash); 
+    }
+
+    static string ReadPassword()
+    {
+       
+        var pass = new StringBuilder();
+        ConsoleKeyInfo key;
+        while (true)
+        {
+            key = Console.ReadKey(true);
+            if (key.Key == ConsoleKey.Enter) break;
+            if (key.Key == ConsoleKey.Backspace && pass.Length > 0)
+            {
+                pass.Remove(pass.Length - 1, 1);
+                Console.Write("\b \b");
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                pass.Append(key.KeyChar);
+                Console.Write('*');
+            }
+        }
+        Console.WriteLine();
+        return pass.ToString();
+    }
+
+   
+   
+
+    static List<JobRecord> ReadAllJobs()
+    {
+        var res = new List<JobRecord>();
+        try
+        {
+            using var sr = new StreamReader(JobsFile, Encoding.UTF8);
+            string header = sr.ReadLine();
+            string line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var f = ParseCsvLine(line);
+                
+                    if (f.Count < 6) continue;
+                    if (!int.TryParse(f[0], out int id)) continue;
+                    var title = f[1];
+                    if (!double.TryParse(f[2], out double salary)) continue;
+                    if (!int.TryParse(f[3], out int vac)) continue;
+                    if (!double.TryParse(f[4], out double comp)) continue;
+                    if (!int.TryParse(f[5], out int clientId)) clientId = 0;
+                    res.Add(new JobRecord(id, title, salary, vac, comp, clientId));
+                }
+                catch { continue; }
+            }
+        }
+        catch { }
+        return res;
+    }
+
+    static void WriteAllJobs(List<JobRecord> jobs)
+    {
+        var lines = new List<string> { JobsHeader };
+        foreach (var j in jobs)
+            lines.Add(ToCsv(j.Id.ToString(), j.Title, j.Salary.ToString(), j.Vacancies.ToString(), j.Competition.ToString(), j.ClientId.ToString()));
+        WriteAllLines(JobsFile, lines);
+    }
+
+    static void AppendJob(JobRecord job)
+    {
+        AppendLineToFile(JobsFile, ToCsv(job.Id.ToString(), job.Title, job.Salary.ToString(), job.Vacancies.ToString(), job.Competition.ToString(), job.ClientId.ToString()));
+    }
+
+    static List<ClientRecord> ReadAllClients()
+    {
+        var res = new List<ClientRecord>();
+        try
+        {
+            using var sr = new StreamReader(ClientsFile, Encoding.UTF8);
+            string header = sr.ReadLine();
+            string line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var f = ParseCsvLine(line);
+                    if (f.Count < 5) continue;
+                    if (!int.TryParse(f[0], out int id)) continue;
+                    var name = f[1];
+                    if (!int.TryParse(f[2], out int age)) age = 0;
+                    var city = f[3];
+                    var prof = f[4];
+                    res.Add(new ClientRecord(id, name, age, city, prof));
+                }
+                catch { continue; }
+            }
+        }
+        catch { }
+        return res;
+    }
+
+   
+    static void AppendClient(ClientRecord client)
+    {
+        AppendLineToFile(ClientsFile, ToCsv(client.Id.ToString(), client.Name, client.Age.ToString(), client.City, client.Profession));
+    }
+
+
 
 
     static void ShowMainMenu()
@@ -95,7 +468,7 @@ class Program
         while (true)
         {
             Console.ForegroundColor = ConsoleColor.Magenta;
-            Console.WriteLine("--- Головне меню ---");
+            Console.WriteLine("\n--- Головне меню ---");
             Console.ResetColor();
 
             Console.WriteLine("\n1. Знайти роботу");
@@ -131,16 +504,16 @@ class Program
                     Console.ResetColor();
                     break;
                 case 3:
-                    EnterData(); // введення 5 записів
+                    EnterDataCsv();
                     break;
                 case 4:
-                    ShowStatistics(); // статистика
+                    ShowStatisticsCsv();
                     break;
                 case 5:
-                    CreateReport(); // форматований звіт
+                    PrintAllAsTableCsv();
                     break;
                 case 6:
-                    ManageCollectionMenu(); // нове меню керування
+                    ManageCollectionMenuCsv();
                     break;
                 default:
                     Console.ForegroundColor = ConsoleColor.Red;
@@ -150,6 +523,8 @@ class Program
             }
         }
     }
+
+
 
     static void ShowJobMenu()
     {
@@ -159,68 +534,25 @@ class Program
             Console.WriteLine("\n--- Меню професій ---");
             Console.ResetColor();
 
-            Console.WriteLine("1. Програміст");
-            Console.WriteLine("2. Дизайнер");
-            Console.WriteLine("3. Менеджер");
-            Console.WriteLine("4. Інженер");
-            Console.WriteLine("5. Маркетолог");
-            Console.WriteLine("6. Водій");
-            Console.WriteLine("7. Електрик");
-            Console.WriteLine("8. Лікар");
-            Console.WriteLine("9. Вчитель");
+            var professions = new[] { "Програміст", "Дизайнер", "Менеджер", "Інженер", "Маркетолог", "Водій", "Електрик", "Лікар", "Вчитель"};
+            for (int i = 0; i < professions.Length; i++) Console.WriteLine($"{i + 1}. {professions[i]}");
             Console.WriteLine("0. Повернутись у головне меню");
 
             Console.Write("\nВиберіть професію (0–9): ");
             string input = Console.ReadLine();
 
-            if (!int.TryParse(input, out int choice))
+            if (!int.TryParse(input, out int choice) || choice < 0 || choice > professions.Length)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("Неправильний ввід! Введіть число від 0 до 9.");
                 Console.ResetColor();
                 continue;
             }
-
-            switch (choice)
-            {
-                case 0:
-                    return; // повертатись у головне меню
-                case 1:
-                    CalculateProfession("Програміст");
-                    break;
-                case 2:
-                    CalculateProfession("Дизайнер");
-                    break;
-                case 3:
-                    CalculateProfession("Менеджер");
-                    break;
-                case 4:
-                    CalculateProfession("Інженер");
-                    break;
-                case 5:
-                    CalculateProfession("Маркетолог");
-                    break;
-                case 6:
-                    CalculateProfession("Водій");
-                    break;
-                case 7:
-                    CalculateProfession("Електрик");
-                    break;
-                case 8:
-                    CalculateProfession("Лікар");
-                    break;
-                case 9:
-                    CalculateProfession("Вчитель");
-                    break;
-                default:
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("Неправильний вибір! Спробуйте ще раз.");
-                    Console.ResetColor();
-                    break;
-            }
+            if (choice == 0) return;
+            string profession = professions[choice - 1];
+            CalculateProfession(profession);
         }
     }
-
 
     static void CalculateProfession(string profession)
     {
@@ -232,16 +564,15 @@ class Program
         double avgSalary = ReadDouble("Введіть середню зарплату: ");
         double competition = ReadDouble("Введіть рівень конкуренції (людей на вакансію): ");
 
-
         double score = 0.0;
         try
         {
             if (competition <= 0)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Попередження: конкуренція не може бути < 0.");
+                Console.WriteLine("Попередження: конкуренція не може бути <= 0, використано 1.");
                 Console.ResetColor();
-
+                competition = 1;
             }
             score = Math.Sqrt((avgSalary * vacancies) / competition);
         }
@@ -270,51 +601,30 @@ class Program
         Console.ResetColor();
     }
 
+  
 
-    static void EnterData()
+    
+
+    static void EnterDataCsv()
     {
+        Console.WriteLine("\n--- Додавання нових записів (через CSV) ---");
+        int count = (int)ReadDouble("Скільки записів додати? ");
+        if (count <= 0) { Console.WriteLine("Нічого не додано."); return; }
 
-        Console.WriteLine("\n--- Заповнення даних (5 записів) ---");
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < count; i++)
         {
-
             Console.WriteLine($"\n--- Запис {i + 1} ---");
-
-
             Console.Write("Назва професії: ");
             string title = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(title))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Порожня назва — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
-
+            if (string.IsNullOrWhiteSpace(title)) { Console.WriteLine("Пропущено порожню назву."); continue; }
 
             double salary = ReadDouble("Середня зарплата (грн): ");
-            if (salary < 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Зарплата не може бути від'ємною — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
+            if (salary < 0) { Console.WriteLine("Пропущено через від'ємну зарплату."); continue; }
 
             int vacancies = (int)ReadDouble("Кількість вакансій: ");
-            if (vacancies < 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Кількість вакансій не може бути від'ємною — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
-
+            if (vacancies < 0) { Console.WriteLine("Пропущено через від'ємну к-ть вакансій."); continue; }
 
             double competition = ReadDouble("Рівень конкуренції: ");
-
-            jobsData[i] = new JobRecord(title, salary, vacancies, competition);
-
 
             Console.Write("Ім'я клієнта: ");
             string clientName = Console.ReadLine();
@@ -322,132 +632,72 @@ class Program
             Console.Write("Місто клієнта: ");
             string city = Console.ReadLine();
 
-            clients[i] = new Client(clientName, age, city, title);
+            
+            int clientId = GetNextIdFromFile(ClientsFile);
+            var client = new ClientRecord(clientId, clientName, age, city, title);
+            AppendClient(client);
 
+          
+            int jobId = GetNextIdFromFile(JobsFile);
+            var job = new JobRecord(jobId, title, salary, vacancies, competition, clientId);
+            AppendJob(job);
 
-
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Записи додано.");
+            Console.ResetColor();
         }
-
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("\nВведення даних завершено.");
-        Console.ResetColor();
     }
 
-    static void ShowStatistics()
+    
+
+    static void PrintAllAsTableCsv()
     {
-        Console.WriteLine("\n--- Статистика по введених вакансіях ---");
-
-        double sumSalary = 0;
-        int filled = 0;
-        double minSalary = double.MaxValue;
-        double maxSalary = double.MinValue;
-        int countAbove20000 = 0;
-
-        foreach (var j in jobsData)
+        var jobs = ReadAllJobs();
+        var clientsList = ReadAllClients();
+        var clients = new Dictionary<int, ClientRecord>();
+        foreach (var c in clientsList)
         {
-            if (string.IsNullOrWhiteSpace(j.Title))
-                continue;
-
-            filled++;
-            sumSalary += j.Salary;
-            if (j.Salary < minSalary) minSalary = j.Salary;
-            if (j.Salary > maxSalary) maxSalary = j.Salary;
-            if (j.Salary > 20000) countAbove20000++;
+            if (!clients.ContainsKey(c.Id)) clients[c.Id] = c;
         }
 
-        if (filled == 0)
+        Console.WriteLine("\n--- Таблиця вакансій ---");
+        Console.WriteLine("{0,-4} {1,-25} {2,12} {3,10} {4,12} {5,-20}", "Id", "Професія", "Зарплата", "Вакансії", "Конкуренція", "Клієнт(місто)");
+        Console.WriteLine(new string('-', 95));
+        if (jobs.Count == 0)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("Немає введених записів для статистики.");
+            Console.WriteLine("Немає записів.");
             Console.ResetColor();
             return;
         }
 
-        double avg = sumSalary / filled;
+       
+        jobs.Sort((a, b) => a.Id.CompareTo(b.Id));
 
-        Console.WriteLine($"Кількість заповнених записів: {filled}");
-        Console.WriteLine($"Загальна сума зарплат: {sumSalary:F2} грн");
-        Console.WriteLine($"Середня зарплата: {avg:F2} грн");
-        Console.WriteLine($"Мінімальна зарплата: {minSalary:F2} грн");
-        Console.WriteLine($"Максимальна зарплата: {maxSalary:F2} грн");
-        Console.WriteLine($"Кількість зарплат більше 20000 грн: {countAbove20000}");
-
-        
-        int sumVacancies = 0;
-        int minVac = int.MaxValue;
-        int maxVac = int.MinValue;
-        double sumCompetition = 0;
-        double minComp = double.MaxValue;
-        double maxComp = double.MinValue;
-        int vacCount = 0;
-        int compCount = 0;
-
-        foreach (var j in jobsData)
+        foreach (var j in jobs)
         {
-            if (string.IsNullOrWhiteSpace(j.Title)) continue;
-            sumVacancies += j.Vacancies;
-            if (j.Vacancies < minVac) minVac = j.Vacancies;
-            if (j.Vacancies > maxVac) maxVac = j.Vacancies;
-            vacCount++;
-
-            sumCompetition += j.Competition;
-            if (j.Competition < minComp) minComp = j.Competition;
-            if (j.Competition > maxComp) maxComp = j.Competition;
-            compCount++;
-        }
-
-        if (vacCount > 0)
-        {
-            Console.WriteLine($"\nВакансій: загалом {sumVacancies}, мін {minVac}, макс {maxVac}, середнє {(double)sumVacancies / vacCount:F2}");
-        }
-        if (compCount > 0)
-        {
-            Console.WriteLine($"Конкуренція: загальна {sumCompetition:F2}, мін {minComp:F2}, макс {maxComp:F2}, середнє {sumCompetition / compCount:F2}");
+            string clientInfo = "-";
+            if (clients.TryGetValue(j.ClientId, out var c))
+                clientInfo = $"{Truncate(c.Name, 12)}({Truncate(c.City, 6)})";
+            Console.WriteLine("{0,-4} {1,-25} {2,12:F2} {3,10} {4,12:F2} {5,-20}", j.Id, Truncate(j.Title, 25), j.Salary, j.Vacancies, j.Competition, clientInfo);
         }
     }
 
 
-    static void CreateReport()
-    {
-
-        Console.WriteLine("\n--- Звіт ---");
-
-        for (int i = 0; i < jobsData.Length; i++)
-        {
-            if (string.IsNullOrWhiteSpace(jobsData[i].Title))
-            {
-
-                break;
-            }
-
-            Console.WriteLine($"\nЗапис #{i + 1}");
-            Console.WriteLine($"Професія: {jobsData[i].Title}");
-            Console.WriteLine($"Зарплата: {jobsData[i].Salary} грн");
-            Console.WriteLine($"Вакансії: {jobsData[i].Vacancies}");
-            Console.WriteLine($"Конкуренція: {jobsData[i].Competition}");
-
-            Console.WriteLine($"Клієнт: {clients[i].Name}, {clients[i].Age} років, місто {clients[i].City}");
-
-        }
-
-        Console.WriteLine("\n--- Кінець звіту ---");
-    }
-
-
-    static void ManageCollectionMenu()
+    static void ManageCollectionMenuCsv()
     {
         while (true)
         {
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n--- Керування базою ---");
+            Console.WriteLine("\n--- Керування базою (CSV) ---");
             Console.ResetColor();
-            Console.WriteLine("1. Додати елементи");
-            Console.WriteLine("2. Вивести всі елементи");
-            Console.WriteLine("3. Пошук елемента");
-            Console.WriteLine("4. Видалення елемента");
-            Console.WriteLine("5. Сортування");
-            Console.WriteLine("6. Статистика");
-            Console.WriteLine("0. Повернутись у головне меню");
+            Console.WriteLine("1. Додати вакансію");
+            Console.WriteLine("2. Вивести всі вакансії");
+            Console.WriteLine("3. Пошук вакансії");
+            Console.WriteLine("4. Видалити вакансію");
+            Console.WriteLine("5. Редагувати вакансію");
+            Console.WriteLine("6. Сортування (тимчасове виведення)");
+            Console.WriteLine("0. Повернутись");
 
             Console.Write("\nВиберіть (0–6): ");
             string input = Console.ReadLine();
@@ -458,446 +708,191 @@ class Program
                 Console.ResetColor();
                 continue;
             }
-
             switch (choice)
             {
-                case 0:
-                    return;
-                case 1:
-                    AddElements();
-                    break;
-                case 2:
-                    PrintAllAsTable();
-                    break;
-                case 3:
-                    SearchElement();
-                    break;
-                case 4:
-                    DeleteElement();
-                    break;
-                case 5:
-                    SortMenu();
-                    break;
-                case 6:
-                    ShowStatistics();
-                    break;
+                case 0: return;
+                case 1: EnterDataCsv(); break;
+                case 2: PrintAllAsTableCsv(); break;
+                case 3: SearchElementCsv(); break;
+                case 4: DeleteElementCsv(); break;
+                case 5: EditElementCsv(); break;
+                case 6: SortAndShowCsv(); break;
                 default:
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("Невідомий вибір.");
-                    Console.ResetColor();
-                    break;
+                Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine("Невідомий вибір."); Console.ResetColor(); break;
             }
         }
     }
 
-    static void AddElements()
+    static void SearchElementCsv()
     {
-        int freeSlots = 0;
-        for (int i = 0; i < jobsData.Length; i++)
+        Console.WriteLine("\n--- Пошук ---");
+        Console.WriteLine("1. За Id");
+        Console.WriteLine("2. За назвою (частково)");
+        Console.Write("Виберіть (1-2): ");
+        var s = Console.ReadLine();
+        if (s == "1")
         {
-            if (string.IsNullOrWhiteSpace(jobsData[i].Title)) freeSlots++;
+            int id = (int)ReadDouble("Введіть Id: ");
+            var job = (JobRecord?)null;
+            var jobs = ReadAllJobs();
+            foreach (var j in jobs) if (j.Id == id) { job = j; break; }
+            if (job == null) { Console.WriteLine("Не знайдено."); return; }
+            PrintSingleCsv(job);
         }
-
-        if (freeSlots == 0)
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("Масив вже заповнений. Спочатку видаліть елемент.");
-            Console.ResetColor();
-            return;
-        }
-
-        Console.WriteLine($"\nВільних місць: {freeSlots}. Скільки додати? (1–{freeSlots})");
-        int toAdd = (int)ReadDouble("Кількість для додавання: ");
-        if (toAdd < 1) { Console.WriteLine("Нічого не додано."); return; }
-        if (toAdd > freeSlots) toAdd = freeSlots;
-
-        for (int k = 0; k < toAdd; k++)
-        {
-            int idx = -1;
-            for (int i = 0; i < jobsData.Length; i++) if (string.IsNullOrWhiteSpace(jobsData[i].Title)) { idx = i; break; }
-
-            if (idx == -1) break;
-
-            Console.WriteLine($"\n--- Додавання запису у позицію #{idx} ---");
-            Console.Write("Назва професії: ");
-            string title = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(title))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Порожня назва — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
-
-            double salary = ReadDouble("Середня зарплата (грн): ");
-            if (salary < 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Зарплата не може бути від'ємною — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
-
-            int vacancies = (int)ReadDouble("Кількість вакансій: ");
-            if (vacancies < 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("К-ть вакансій не може бути від'ємною — запис пропускається.");
-                Console.ResetColor();
-                continue;
-            }
-
-            double competition = ReadDouble("Рівень конкуренції: ");
-
-            jobsData[idx] = new JobRecord(title, salary, vacancies, competition);
-
-            Console.Write("Ім'я клієнта: ");
-            string clientName = Console.ReadLine();
-            int age = (int)ReadDouble("Вік клієнта: ");
-            Console.Write("Місто клієнта: ");
-            string city = Console.ReadLine();
-
-            clients[idx] = new Client(clientName, age, city, title);
-
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Додано на позицію #{idx}.");
-            Console.ResetColor();
-        }
-    }
-
-   
-    static void PrintAllAsTable()
-    {
-        Console.WriteLine("\n--- Таблиця вакансій ---");
-        Console.WriteLine("{0,-4} {1,-20} {2,12} {3,10} {4,12} {5,-15}", "№", "Професія", "Зарплата", "Вакансії", "Конкуренція", "Клієнт(місто)");
-        Console.WriteLine(new string('-', 80));
-
-        int shown = 0;
-        for (int i = 0; i < jobsData.Length; i++)
-        {
-            var j = jobsData[i];
-            if (string.IsNullOrWhiteSpace(j.Title)) continue;
-            var cl = clients[i];
-            string clientInfo = string.IsNullOrWhiteSpace(cl.Name) ? "-" : $"{cl.Name}({cl.City})";
-            Console.WriteLine("{0,-4} {1,-20} {2,12:F2} {3,10} {4,12:F2} {5,-15}", i, Truncate(j.Title, 20), j.Salary, j.Vacancies, j.Competition, Truncate(clientInfo, 15));
-            shown++;
-        }
-        if (shown == 0)
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("Немає записів для виведення.");
-            Console.ResetColor();
-        }
-    }
-
-   
-    static void SearchElement()
-    {
-        Console.WriteLine("\n--- Пошук елемента ---");
-        Console.WriteLine("1. За індексом");
-        Console.WriteLine("2. За назвою");
-        Console.Write("\nВиберіть (1–2): ");
-        string input = Console.ReadLine();
-        if (!int.TryParse(input, out int mode) || (mode != 1 && mode != 2))
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Неправильний вибір.");
-            Console.ResetColor();
-            return;
-        }
-
-        if (mode == 1)
-        {
-            int idx = (int)ReadDouble("Введіть індекс (0–" + (jobsData.Length - 1) + "): ");
-            if (idx < 0 || idx >= jobsData.Length)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Індекс поза межами.");
-                Console.ResetColor();
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(jobsData[idx].Title))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("У цій позиції запису немає.");
-                Console.ResetColor();
-                return;
-            }
-            PrintSingle(idx);
-        }
-        else
+        else if (s == "2")
         {
             Console.Write("Введіть частину назви: ");
-            string pattern = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(pattern))
+            var pattern = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(pattern)) { Console.WriteLine("Порожній запит."); return; }
+            var allJobs = ReadAllJobs();
+            var list = new List<JobRecord>();
+            foreach (var j in allJobs)
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Порожній запит.");
-                Console.ResetColor();
-                return;
+                if (j.Title.IndexOf(pattern, StringComparison.CurrentCultureIgnoreCase) >= 0)
+                    list.Add(j);
             }
-            bool found = false;
-            for (int i = 0; i < jobsData.Length; i++)
-            {
-                if (!string.IsNullOrWhiteSpace(jobsData[i].Title) && jobsData[i].Title.IndexOf(pattern, StringComparison.CurrentCultureIgnoreCase) >= 0)
-                {
-                    PrintSingle(i);
-                    found = true;
-                }
-            }
-            if (!found)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Нічого не знайдено.");
-                Console.ResetColor();
-            }
+            if (list.Count == 0) { Console.WriteLine("Не знайдено."); return; }
+            foreach (var j in list) PrintSingleCsv(j);
         }
+        else Console.WriteLine("Невірний вибір.");
     }
 
-    static void PrintSingle(int i)
+    static void PrintSingleCsv(JobRecord j)
     {
-        Console.WriteLine($"\nЗапис #{i}");
-        Console.WriteLine($"Професія: {jobsData[i].Title}");
-        Console.WriteLine($"Зарплата: {jobsData[i].Salary} грн");
-        Console.WriteLine($"Вакансії: {jobsData[i].Vacancies}");
-        Console.WriteLine($"Конкуренція: {jobsData[i].Competition}");
-        Console.WriteLine($"Клієнт: {clients[i].Name} {clients[i].Age} років, місто {clients[i].City}");
+        var clients = ReadAllClients();
+        ClientRecord? client = null;
+        foreach (var c in clients) if (c.Id == j.ClientId) { client = c; break; }
+        Console.WriteLine($"\nЗапис Id {j.Id}\nПрофесія: {j.Title}\nЗарплата: {j.Salary}\nВакансії: {j.Vacancies}\nКонкуренція: {j.Competition}");
+        if (client != null)
+            Console.WriteLine($"Клієнт: {client.Name}, {client.Age} років, {client.City}");
     }
 
-   
-    static void DeleteElement()
+    static void DeleteElementCsv()
     {
-        Console.WriteLine("\n--- Видалення елемента ---");
-        Console.WriteLine("1. За індексом");
-        Console.WriteLine("2. За назвою (перший знайдений)");
-        Console.Write("\nВиберіть (1–2): ");
-        string input = Console.ReadLine();
-        if (!int.TryParse(input, out int mode) || (mode != 1 && mode != 2))
+        Console.WriteLine("\n--- Видалення вакансії ---");
+        int id = (int)ReadDouble("Id для видалення: ");
+        var jobs = ReadAllJobs();
+        JobRecord? job = null;
+        foreach (var j in jobs) if (j.Id == id) { job = j; break; }
+        if (job == null) { Console.WriteLine("Не знайдено запису."); return; }
+        Console.Write($"Підтвердіть видалення Id {id} (y/n): ");
+        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("Скасовано."); return; }
+        jobs.RemoveAll(j => j.Id == id);
+        WriteAllJobs(jobs);
+        Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine("Видалено."); Console.ResetColor();
+    }
+
+    static void EditElementCsv()
+    {
+        Console.WriteLine("\n--- Редагування вакансії ---");
+        int id = (int)ReadDouble("Id для редагування: ");
+        var jobs = ReadAllJobs();
+        JobRecord? job = null;
+        foreach (var j in jobs) if (j.Id == id) { job = j; break; }
+        if (job == null) { Console.WriteLine("Не знайдено."); return; }
+
+        Console.WriteLine("Залиште порожнім, щоб не змінювати значення.");
+        Console.Write($"Назва ({job.Title}): ");
+        var newTitle = Console.ReadLine();
+        Console.Write($"Зарплата ({job.Salary}): ");
+        var newSalaryStr = Console.ReadLine();
+        Console.Write($"Вакансії ({job.Vacancies}): ");
+        var newVacStr = Console.ReadLine();
+        Console.Write($"Конкуренція ({job.Competition}): ");
+        var newCompStr = Console.ReadLine();
+
+        string title = string.IsNullOrWhiteSpace(newTitle) ? job.Title : newTitle;
+        double salary = job.Salary; if (double.TryParse(newSalaryStr, out double tmpS)) salary = tmpS;
+        int vac = job.Vacancies; if (int.TryParse(newVacStr, out int tmpV)) vac = tmpV;
+        double comp = job.Competition; if (double.TryParse(newCompStr, out double tmpC)) comp = tmpC;
+
+        var idx = jobs.FindIndex(j => j.Id == id);
+        jobs[idx] = new JobRecord(job.Id, title, salary, vac, comp, job.ClientId);
+        WriteAllJobs(jobs);
+        Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine("Оновлено."); Console.ResetColor();
+    }
+
+    static void SortAndShowCsv()
+    {
+        var jobs = ReadAllJobs();
+        if (jobs.Count == 0) { Console.WriteLine("Немає даних."); return; }
+        Console.WriteLine("Поле сортування: 1-Title 2-Salary 3-Vacancies");
+        var s = Console.ReadLine();
+        var sorted = new List<JobRecord>(jobs);
+        if (s == "1") sorted.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Title, b.Title));
+        else if (s == "2") sorted.Sort((a, b) => a.Salary.CompareTo(b.Salary));
+        else if (s == "3") sorted.Sort((a, b) => a.Vacancies.CompareTo(b.Vacancies));
+        else { Console.WriteLine("Невірно."); return; }
+
+        Console.WriteLine("{0,-4} {1,-25} {2,12} {3,10} {4,12}", "Id", "Професія", "Зарплата", "Вакансії", "Конкуренція");
+        Console.WriteLine(new string('-', 80));
+        foreach (var j in sorted) Console.WriteLine("{0,-4} {1,-25} {2,12:F2} {3,10} {4,12:F2}", j.Id, Truncate(j.Title, 25), j.Salary, j.Vacancies, j.Competition);
+    }
+
+
+
+    static void ShowStatisticsCsv()
+    {
+        var jobs = ReadAllJobs();
+        if (jobs.Count == 0)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Неправильний вибір.");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("Немає даних для статистики.");
             Console.ResetColor();
             return;
         }
 
-        if (mode == 1)
+        double sumSalary = 0;
+        double minSalary = double.MaxValue;
+        double maxSalary = double.MinValue;
+        double sumVacancies = 0;
+        int minVac = int.MaxValue;
+        int maxVac = int.MinValue;
+        double sumCompetition = 0;
+        double minCompetition = double.MaxValue;
+        double maxCompetition = double.MinValue;
+
+        foreach (var j in jobs)
         {
-            int idx = (int)ReadDouble("Введіть індекс для видалення (0–" + (jobsData.Length - 1) + "): ");
-            if (idx < 0 || idx >= jobsData.Length)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Індекс поза межами.");
-                Console.ResetColor();
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(jobsData[idx].Title))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Немає запису за вказаним індексом.");
-                Console.ResetColor();
-                return;
-            }
-            ShiftLeftFrom(idx);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Елемент за індексом {idx} видалено.");
-            Console.ResetColor();
+            sumSalary += j.Salary;
+            if (j.Salary < minSalary) minSalary = j.Salary;
+            if (j.Salary > maxSalary) maxSalary = j.Salary;
+
+            sumVacancies += j.Vacancies;
+            if (j.Vacancies < minVac) minVac = j.Vacancies;
+            if (j.Vacancies > maxVac) maxVac = j.Vacancies;
+
+            sumCompetition += j.Competition;
+            if (j.Competition < minCompetition) minCompetition = j.Competition;
+            if (j.Competition > maxCompetition) maxCompetition = j.Competition;
         }
-        else
-        {
-            Console.Write("Введіть назву для видалення: ");
-            string pattern = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(pattern))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Порожній запит.");
-                Console.ResetColor();
-                return;
-            }
-            int foundIdx = -1;
-            for (int i = 0; i < jobsData.Length; i++)
-            {
-                if (!string.IsNullOrWhiteSpace(jobsData[i].Title) && jobsData[i].Title.IndexOf(pattern, StringComparison.CurrentCultureIgnoreCase) >= 0)
-                {
-                    foundIdx = i;
-                    break;
-                }
-            }
-            if (foundIdx == -1)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Нічого не знайдено для видалення.");
-                Console.ResetColor();
-                return;
-            }
-            ShiftLeftFrom(foundIdx);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Елемент '{pattern}' видалено (індекс {foundIdx}).");
-            Console.ResetColor();
-        }
+
+        double avgSalary = sumSalary / jobs.Count;
+        double avgVacancies = sumVacancies / jobs.Count;
+        double avgCompetition = sumCompetition / jobs.Count;
+
+        Console.WriteLine("\n--- Статистика по зарплатах ---");
+        Console.WriteLine($"Кількість: {jobs.Count}");
+        Console.WriteLine($"Загальна сума зарплат: {sumSalary:F2}");
+        Console.WriteLine($"Середня зарплата: {avgSalary:F2}");
+        Console.WriteLine($"Мінімальна: {minSalary:F2}");
+        Console.WriteLine($"Максимальна: {maxSalary:F2}");
+
+        Console.WriteLine("\n--- Статистика по вакансіям ---");
+        Console.WriteLine($"Загальна кількість вакансій: {sumVacancies}");
+        Console.WriteLine($"Мін вакансій: {minVac}");
+        Console.WriteLine($"Макс вакансій: {maxVac}");
+        Console.WriteLine($"Середня вакансій на запис: {avgVacancies:F2}");
+
+        Console.WriteLine("\n--- Статистика по конкуренції ---");
+        Console.WriteLine($"Загалом: {sumCompetition:F2}");
+        Console.WriteLine($"Мін: {minCompetition:F2}");
+        Console.WriteLine($"Макс: {maxCompetition:F2}");
+        Console.WriteLine($"Середнє: {avgCompetition:F2}");
     }
+
 
    
-    static void ShiftLeftFrom(int idx)
-    {
-        for (int i = idx; i < jobsData.Length - 1; i++)
-        {
-            jobsData[i] = jobsData[i + 1];
-            clients[i] = clients[i + 1];
-        }
-        jobsData[jobsData.Length - 1] = new JobRecord(); 
-        clients[clients.Length - 1] = new Client();
-    }
-
-   
-    static void SortMenu()
-    {
-        Console.WriteLine("\n--- Сортування ---");
-        Console.WriteLine("Поле сортування:");
-        Console.WriteLine("1. За назвою (алфавіт)");
-        Console.WriteLine("2. За зарплатою (зростання)");
-        Console.WriteLine("3. За кількістю вакансій (зростання)");
-        Console.Write("\nВиберіть поле (1–3): ");
-        string input = Console.ReadLine();
-        if (!int.TryParse(input, out int field) || field < 1 || field > 3)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Неправильний вибір.");
-            Console.ResetColor();
-            return;
-        }
-
-        Console.WriteLine("\nАлгоритм сортування:");
-        Console.WriteLine("1. Власний (бульбашковий)");
-        Console.WriteLine("2. Вбудований");
-        Console.Write("\nВиберіть (1–2): ");
-        input = Console.ReadLine();
-        if (!int.TryParse(input, out int algo) || (algo != 1 && algo != 2))
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Неправильний вибір.");
-            Console.ResetColor();
-            return;
-        }
-
-        if (algo == 1)
-        {
-            BubbleSort(field);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Сортування бульбашкою виконано.");
-            Console.ResetColor();
-        }
-        else
-        {
-            BuiltInSort(field);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Вбудоване сортування (List.Sort) виконано.");
-            Console.ResetColor();
-        }
-    }
-
-    static void BubbleSort(int field)
-    {
-        int n = jobsData.Length;
-        bool swapped;
-        
-        int last = -1;
-        for (int i = 0; i < jobsData.Length; i++) if (!string.IsNullOrWhiteSpace(jobsData[i].Title)) last = i;
-        if (last <= 0) return;
-
-        for (int pass = 0; pass <= last; pass++)
-        {
-            swapped = false;
-            for (int i = 0; i < last - pass; i++)
-            {
-                if (string.IsNullOrWhiteSpace(jobsData[i].Title)) continue;
-                if (string.IsNullOrWhiteSpace(jobsData[i + 1].Title)) continue;
-
-                bool needSwap = false;
-                switch (field)
-                {
-                    case 1:
-                        if (string.Compare(jobsData[i].Title, jobsData[i + 1].Title, StringComparison.CurrentCultureIgnoreCase) > 0) needSwap = true;
-                        break;
-                    case 2:
-                        if (jobsData[i].Salary > jobsData[i + 1].Salary) needSwap = true;
-                        break;
-                    case 3:
-                        if (jobsData[i].Vacancies > jobsData[i + 1].Vacancies) needSwap = true;
-                        break;
-                }
-                if (needSwap)
-                {
-                    var tmpJ = jobsData[i];
-                    jobsData[i] = jobsData[i + 1];
-                    jobsData[i + 1] = tmpJ;
-
-                    var tmpC = clients[i];
-                    clients[i] = clients[i + 1];
-                    clients[i + 1] = tmpC;
-
-                    swapped = true;
-                }
-            }
-            if (!swapped) break;
-        }
-    }
-
-   
-    static void BuiltInSort(int field)
-    {
-       
-        List<JobRecord> jlist = new List<JobRecord>();
-        List<Client> clist = new List<Client>();
-        for (int i = 0; i < jobsData.Length; i++)
-        {
-            if (!string.IsNullOrWhiteSpace(jobsData[i].Title))
-            {
-                jlist.Add(jobsData[i]);
-                clist.Add(clients[i]);
-            }
-        }
-        if (jlist.Count <= 1) return;
-
-        if (field == 1)
-        {
-            jlist.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.CurrentCultureIgnoreCase));
-        }
-        else if (field == 2)
-        {
-            jlist.Sort((a, b) => a.Salary.CompareTo(b.Salary));
-        }
-        else if (field == 3)
-        {
-            jlist.Sort((a, b) => a.Vacancies.CompareTo(b.Vacancies));
-        }
-
-       
-        int idx = 0;
-        for (int i = 0; i < jobsData.Length; i++)
-        {
-            jobsData[i] = new JobRecord();
-            clients[i] = new Client();
-        }
-        for (int i = 0; i < jlist.Count && i < jobsData.Length; i++)
-        {
-            jobsData[i] = jlist[i];
-           
-            clients[i] = FindClientByProfession(jlist[i].Title);
-        }
-    }
-
-   
-    static Client FindClientByProfession(string profession)
-    {
-        for (int i = 0; i < clients.Length; i++)
-        {
-            if (!string.IsNullOrWhiteSpace(clients[i].Profession) && clients[i].Profession.Equals(profession, StringComparison.CurrentCultureIgnoreCase))
-                return clients[i];
-        }
-        return new Client();
-    }
-
-    
 
     static double ReadDouble(string prompt)
     {
@@ -905,10 +900,9 @@ class Program
         {
             Console.Write(prompt);
             string input = Console.ReadLine();
-
+            if (string.IsNullOrWhiteSpace(input)) return 0;
             if (double.TryParse(input, out double result))
                 return result;
-
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine("Неправильний ввід! Введіть число.");
             Console.ResetColor();
@@ -921,4 +915,6 @@ class Program
         if (s.Length <= max) return s;
         return s.Substring(0, max - 3) + "...";
     }
+
+  
 }
